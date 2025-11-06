@@ -126,4 +126,54 @@ async function sendMultiProductMessage(to, header, body, product_skus) {
     await sendMessage(data);
 }
 
-module.exports = { sendMessage, sendTextMessage, sendReplyButtons, sendMultiProductMessage };
+/**
+ * Sends the 'order_confirmation' message template.
+ * @param {string} to - The recipient's phone number
+ * @param {string} name - The user's name (for {{1}})
+ * @param {string} cartSummary - The formatted cart string (for {{2}})
+ * @param {string} address - The user's address (for {{3}})
+ */
+async function sendOrderConfirmationTemplate(to, name, cartSummary, address) {
+    const data = {
+        messaging_product: 'whatsapp',
+        to: to,
+        type: 'template',
+        template: {
+            name: 'order_confirmation', // Must match the name you created
+            language: {
+                code: 'en' // Use 'en_US' or 'en' as per your template
+            },
+            components: [
+                {
+                    type: 'header',
+                    parameters: [
+                        {
+                            type: 'text',
+                            text: 'Your order is confirmed!' // Fallback text, though not always needed
+                        }
+                    ]
+                },
+                {
+                    type: 'body',
+                    parameters: [
+                        {
+                            type: 'text',
+                            text: name
+                        },
+                        {
+                            type: 'text',
+                            text: cartSummary
+                        },
+                        {
+                            type: 'text',
+                            text: address
+                        }
+                    ]
+                }
+            ]
+        }
+    };
+    await sendMessage(data);
+}
+
+module.exports = { sendMessage, sendTextMessage, sendReplyButtons, sendMultiProductMessage, sendOrderConfirmationTemplate };
