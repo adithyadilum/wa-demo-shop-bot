@@ -133,25 +133,20 @@ async function sendMultiProductMessage(to, header, body, product_skus) {
  * @param {string} cartSummary - The formatted cart string (for {{2}})
  * @param {string} address - The user's address (for {{3}})
  */
+
 async function sendOrderConfirmationTemplate(to, name, cartSummary, address) {
     const data = {
         messaging_product: 'whatsapp',
         to: to,
         type: 'template',
         template: {
-            name: 'order_confirmation', // Must match the name you created
+            name: 'order_confirmation', // Must match the name
             language: {
-                code: 'en' // Use 'en_US' or 'en' as per your template
+                code: 'en'
             },
             components: [
                 {
-                    type: 'header',
-                    parameters: [
-                        {
-                            type: 'text',
-                            text: 'Your order is confirmed!' // Fallback text, though not always needed
-                        }
-                    ]
+                    type: 'header'
                 },
                 {
                     type: 'body',
@@ -169,8 +164,14 @@ async function sendOrderConfirmationTemplate(to, name, cartSummary, address) {
                             text: address
                         }
                     ]
+                },
+                {
+                    type: 'button',
+                    sub_type: 'quick_reply',
+                    index: '0'
                 }
             ]
+            // ------------------------------------
         }
     };
     await sendMessage(data);

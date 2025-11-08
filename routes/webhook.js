@@ -23,7 +23,6 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
 // --- 1. WEBHOOK VERIFICATION (GET) ---
 router.get('/', (req, res) => {
-    // (Same as before)
     let mode = req.query['hub.mode'];
     let token = req.query['hub.verify_token'];
     let challenge = req.query['hub.challenge'];
@@ -165,7 +164,6 @@ router.post('/', async (req, res) => {
 
 /**
  * Sends the main menu List Message
- * (Same as before)
  */
 async function sendMainMenu(to) {
     // (Same code as before)
@@ -212,7 +210,6 @@ async function sendMainMenu(to) {
 
 /**
  * Handles the user's selection from the main menu
- * (UPDATED to handle checkout button)
  */
 async function handleMenuSelection(from, selectedOptionId) {
     let replyText;
@@ -272,10 +269,8 @@ async function handleMenuSelection(from, selectedOptionId) {
 
 /**
  * Handles the user's selection from the category buttons
- * (Same as before)
  */
 async function handleCategorySelection(from, selectedCategoryId) {
-    // (Same as before)
     switch (selectedCategoryId) {
         case 'cat_cheese':
             await sendTextMessage(from, "Sorry, I don't have cheese products set up yet.");
