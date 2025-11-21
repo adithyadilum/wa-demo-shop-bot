@@ -1,4 +1,3 @@
-// routes/webhook.js
 const express = require('express');
 const router = express.Router();
 
@@ -16,19 +15,23 @@ const {
     updateUserData,
     addToCart,
     getCart,
-    clearCart
+    clearCart,
+    createOrder,
+    getOrder
 } = require('../db/firestore');
+
+// --- IMPORT WIT SERVICE ---
+const { detectIntent } = require('../services/wit');
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// --- 1. WEBHOOK VERIFICATION (GET) ---
+// (GET handler)
 router.get('/', (req, res) => {
     let mode = req.query['hub.mode'];
     let token = req.query['hub.verify_token'];
     let challenge = req.query['hub.challenge'];
     if (mode && token) {
         if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('WEBHOOK_VERIFIED');
             res.status(200).send(challenge);
         } else {
             res.sendStatus(403);
@@ -36,10 +39,9 @@ router.get('/', (req, res) => {
     }
 });
 
-// --- 2. RECEIVE MESSAGES (POST) ---
+// (POST handler)
 router.post('/', async (req, res) => {
     let body = req.body;
-    console.log('Incoming webhook:', JSON.stringify(body, null, 2));
 
     if (body.object === 'whatsapp_business_account' && body.entry) {
         body.entry.forEach((entry) => {
@@ -48,125 +50,146 @@ router.post('/', async (req, res) => {
                     const msg = change.value.messages[0];
                     const from = msg.from;
 
-                    // --- 1. Get User and State ---
                     const user = await getOrCreateUser(from);
                     const userState = user.state;
 
-                    // --- HANDLE TEXT MESSAGES (Statefully) ---
                     if (msg.type === 'text') {
-                        const textBody = msg.text.body; // No toLowerCase() yet
+                        const textBody = msg.text.body;
+                        const lowerText = textBody.toLowerCase();
                         console.log(`Message from ${from} (state: ${userState}): ${textBody}`);
 
-                        // --- STATE-BASED LOGIC ---
+                        // 1. Admin Command
+                        if (textBody.startsWith('!resume')) {
+                            await updateUserState(from, 'default');
+                            await sendTextMessage(from, "Bot is now active. Type 'Menu'.");
+                            res.sendStatus(200); return;
+                        }
+
+                        // 2. Check States (Checkout, Tracking, Agent)
                         if (userState === 'awaiting_name') {
-                            // User is replying with their name
                             await updateUserData(from, { name: textBody });
                             await updateUserState(from, 'awaiting_address');
                             await sendTextMessage(from, `Thanks, ${textBody}. What is your delivery address?`);
 
                         } else if (userState === 'awaiting_address') {
-                            // User is replying with their address
-                            const userName = user.name; // Get name from user object
-                            const userAddress = textBody; // Get address from message
-
-                            await updateUserData(from, { address: userAddress });
-                            await updateUserState(from, 'default'); // Reset state
-
+                            const userName = user.name;
+                            const userAddress = textBody;
                             const cart = await getCart(from);
+                            const newOrderId = await createOrder(from, userName, userAddress, cart);
 
-                            // --- 1. Create the cart summary for the template ---
                             let cartSummary = '';
-                            cart.forEach(item => {
-                                cartSummary += `${item.quantity} x ${item.sku}\n`;
-                            });
-                            // Remove trailing newline
+                            cart.forEach(item => { cartSummary += `${item.quantity} x ${item.sku}\n`; });
                             cartSummary = cartSummary.trim();
 
-                            // --- 2. Create the simple text confirmation ---
-                            let textConfirmation = `*Order Confirmed!* (simulation)\n\n${cartSummary}\n\n*Delivering to:*\n${userName}\n${userAddress}`;
-
-                            // --- 3. Send both messages ---
+                            let textConfirmation = `*Order Placed!* 🎉\n\nYour Order ID: *${newOrderId}*\n(Save this to track your order)\n\nItems:\n${cartSummary}\n\nShipping to:\n${userAddress}`;
                             await sendTextMessage(from, textConfirmation);
-
-                            // Send the formal template
-                            await sendOrderConfirmationTemplate(
-                                from,
-                                userName,
-                                cartSummary,
-                                userAddress
-                            );
-
-                            // --- 4. Clear the cart ---
+                            await sendOrderConfirmationTemplate(from, userName, cartSummary, userAddress);
                             await clearCart(from);
+                            await updateUserData(from, { address: userAddress });
+                            await updateUserState(from, 'default');
+
+                        } else if (userState === 'awaiting_order_id') {
+                            if (lowerText === 'menu' || lowerText === 'hi' || lowerText === 'cancel') {
+                                await updateUserState(from, 'default');
+                                await sendMainMenu(from);
+                                return;
+                            }
+                            const orderId = textBody.trim();
+                            const order = await getOrder(orderId);
+
+                            if (order) {
+                                const trackMsg = `📦 *Order Status: ${order.status}*\n\nOrder ID: ${order.order_id}\nItems: ${order.items.length} item(s)\nShipping to: ${order.shipping_address}`;
+                                await sendTextMessage(from, trackMsg);
+                                await updateUserState(from, 'default');
+                                setTimeout(() => sendMainMenu(from), 1000);
+                            } else {
+                                await sendTextMessage(from, `❌ We couldn't find order *${orderId}*.\n\nPlease check the ID and try again, or type 'Menu' to exit.`);
+                            }
+
+                        } else if (userState === 'awaiting_agent') {
+                            console.log('User is waiting for agent...');
+
                         } else {
-                            // --- DEFAULT STATE LOGIC ---
-                            const lowerText = textBody.toLowerCase();
+                            // --- 3. DEFAULT STATE HANDLER (UPDATED WITH NLP) ---
+
+                            // A. Check exact keywords first (for speed)
                             if (lowerText === 'hi' || lowerText === 'hello' || lowerText === 'menu') {
                                 await sendMainMenu(from);
-                            } else {
-                                await sendTextMessage(from, "Sorry, I don't understand. Type 'Menu' to see options.");
+                            }
+                            else {
+                                // B. Use Wit.ai NLP
+                                const { intent, entities } = await detectIntent(textBody);
+                                console.log(`NLP Result: Intent=${intent}`, JSON.stringify(entities));
+
+                                // Get the product entity if it exists
+                                // Wit.ai keys are often 'role:name'
+                                const categoryEntity = entities['product_category:product_category'];
+                                const categoryValue = categoryEntity ? categoryEntity[0].value : null;
+
+                                // LOGIC UPDATE: Check for Intent OR if a Product Entity was found
+                                if (intent === 'browse_category' || categoryValue) {
+
+                                    if (categoryValue === 'coffee') {
+                                        await handleCategorySelection(from, 'cat_coffee');
+                                    } else if (categoryValue === 'cheese') {
+                                        await handleCategorySelection(from, 'cat_cheese');
+                                    } else if (categoryValue === 'bread') {
+                                        await handleCategorySelection(from, 'cat_bread');
+                                    } else {
+                                        // We know they want a product, but we don't sell that specific one
+                                        // OR Wit didn't normalize it to one of our keywords
+                                        const catButtons = [
+                                            { id: 'cat_cheese', title: '🧀 Cheese & Dairy' },
+                                            { id: 'cat_bread', title: '🍞 Fresh Bread' },
+                                            { id: 'cat_coffee', title: '☕ Coffee & Tea' }
+                                        ];
+                                        // Customize message based on what they asked for
+                                        const replyText = categoryValue
+                                            ? `We don't have "${categoryValue}" right now, but check out our other categories:`
+                                            : "I can help with that! Which category?";
+
+                                        await sendReplyButtons(from, replyText, catButtons);
+                                    }
+                                }
+                                else {
+                                    // C. Fallback if NLP fails
+                                    await sendTextMessage(from, "Sorry, I didn't quite get that. Type 'Menu' to see options.");
+                                }
                             }
                         }
                     }
 
-                    // --- HANDLE INTERACTIVE REPLIES ---
-                    if (msg.type === 'interactive') {
+                    // Handle Interactive and Order Messages
+                    if (msg.type === 'interactive' && userState !== 'awaiting_agent') {
                         const reply = msg.interactive;
-
-                        // --- A) Handle List Menu Selections ---
                         if (reply.type === 'list_reply') {
-                            const selectedOptionId = reply.list_reply.id;
-                            console.log(`User ${from} selected menu option: ${selectedOptionId}`);
-                            await handleMenuSelection(from, selectedOptionId);
-                        }
-
-                        // --- B) Handle Reply Button Selections ---
-                        else if (reply.type === 'button_reply') {
-                            const selectedButtonId = reply.button_reply.id;
-                            console.log(`User ${from} selected button: ${selectedButtonId}`);
-
-                            if (selectedButtonId.startsWith('cat_')) {
-                                await handleCategorySelection(from, selectedButtonId);
-                            } else if (selectedButtonId === 'checkout') {
-                                // --- THIS IS THE CHECKOUT TRIGGER ---
+                            await handleMenuSelection(from, reply.list_reply.id);
+                        } else if (reply.type === 'button_reply') {
+                            const bid = reply.button_reply.id;
+                            if (bid.startsWith('cat_')) await handleCategorySelection(from, bid);
+                            else if (bid === 'checkout') {
                                 await updateUserState(from, 'awaiting_name');
                                 await sendTextMessage(from, "Great, let's check out. What is your full name?");
-                            } else if (selectedButtonId === 'menu') {
-                                await sendMainMenu(from);
-                            }
+                            } else if (bid === 'menu') await sendMainMenu(from);
                         }
                     }
 
-                    // --- D) HANDLE PRODUCT "ADD TO CART" ---
-                    if (msg.type === 'order') {
+                    if (msg.type === 'order' && userState !== 'awaiting_agent') {
                         const order = msg.order;
-                        const productItems = order.product_items;
-                        const sku = productItems[0].product_retailer_id;
-                        const quantity = parseInt(productItems[0].quantity, 10);
-
+                        const sku = order.product_items[0].product_retailer_id;
+                        const quantity = parseInt(order.product_items[0].quantity, 10);
                         await addToCart(from, sku, quantity);
-
-                        await sendTextMessage(
-                            from,
-                            `Added ${quantity} x "${sku}" to your cart! 🛒\n\nType 'Menu' to keep shopping.`
-                        );
+                        await sendTextMessage(from, `Added ${quantity} x "${sku}" to your cart! 🛒\n\nType 'Menu' to keep shopping.`);
                     }
                 }
             });
         });
     }
-
     res.sendStatus(200);
 });
 
-
-// --- 3. LOGIC FUNCTIONS ---
-
-/**
- * Sends the main menu List Message
- */
+// --- HANDLER FUNCTIONS ---
 async function sendMainMenu(to) {
-    // (Same code as before)
     const menuData = {
         messaging_product: 'whatsapp',
         to: to,
@@ -208,12 +231,8 @@ async function sendMainMenu(to) {
     await sendMessage(menuData);
 }
 
-/**
- * Handles the user's selection from the main menu
- */
 async function handleMenuSelection(from, selectedOptionId) {
     let replyText;
-
     switch (selectedOptionId) {
         case 'browse_categories':
             const catButtons = [
@@ -223,72 +242,43 @@ async function handleMenuSelection(from, selectedOptionId) {
             ];
             await sendReplyButtons(from, "Great! What are you looking for?", catButtons);
             return;
-
         case 'view_cart':
             const cart = await getCart(from);
-
             if (cart.length === 0) {
                 await sendTextMessage(from, "Your cart is currently empty. Type 'Menu' to start shopping!");
                 return;
             }
-
             let cartMessage = '🛒 *Your Cart*\n\n';
-            cart.forEach(item => {
-                cartMessage += `${item.quantity} x ${item.sku}\n`;
-            });
+            cart.forEach(item => { cartMessage += `${item.quantity} x ${item.sku}\n`; });
             cartMessage += "\nClick 'Checkout' to place your order.";
-
-            const checkoutButtons = [
-                { id: 'checkout', title: '✅ Checkout' },
-                { id: 'menu', title: 'Keep Shopping' }
-            ];
+            const checkoutButtons = [{ id: 'checkout', title: '✅ Checkout' }, { id: 'menu', title: 'Keep Shopping' }];
             await sendReplyButtons(from, cartMessage, checkoutButtons);
             return;
-
-        case 'weekly_specials':
-            replyText = "Here are the specials (coming soon).";
-            break;
         case 'track_order':
-            replyText = "Please enter your order number. (Coming soon).";
-            break;
-        case 'order_history':
-            replyText = "Here is your order history... (Coming soon).";
+            await updateUserState(from, 'awaiting_order_id');
+            replyText = "Please enter your *Order ID* to track your package.\n(Example: ORD-1234)";
             break;
         case 'talk_to_agent':
-            replyText = "Connecting you to an agent... (Coming soon).";
+            await updateUserState(from, 'awaiting_agent');
+            replyText = "I'm connecting you with a human agent. Type `!resume` to reactivate the bot.";
             break;
-        case 'faqs':
-            replyText = "Here are our FAQs... (Coming soon).";
-            break;
-        default:
-            replyText = `You selected an option we're still building! (${selectedOptionId})`;
+        case 'weekly_specials': replyText = "Here are the specials (coming soon)."; break;
+        case 'order_history': replyText = "Here is your order history... (Coming soon)."; break;
+        case 'faqs': replyText = "Here are our FAQs... (Coming soon)."; break;
+        default: replyText = `You selected an option we're still building! (${selectedOptionId})`;
     }
-
     await sendTextMessage(from, replyText);
 }
 
-/**
- * Handles the user's selection from the category buttons
- */
 async function handleCategorySelection(from, selectedCategoryId) {
     switch (selectedCategoryId) {
-        case 'cat_cheese':
-            await sendTextMessage(from, "Sorry, I don't have cheese products set up yet.");
-            break;
-        case 'cat_bread':
-            await sendTextMessage(from, "Sorry, I don't have bread products set up yet.");
-            break;
+        case 'cat_cheese': await sendTextMessage(from, "Sorry, I don't have cheese products set up yet."); break;
+        case 'cat_bread': await sendTextMessage(from, "Sorry, I don't have bread products set up yet."); break;
         case 'cat_coffee':
             const skus = ['coffee_001'];
-            await sendMultiProductMessage(
-                from,
-                'Coffee & Tea',
-                'Here are our top picks. You can view details and add to your cart right here.',
-                skus
-            );
+            await sendMultiProductMessage(from, 'Coffee & Tea', 'Here are our top picks.', skus);
             break;
-        default:
-            await sendTextMessage(from, "You picked an unknown category.");
+        default: await sendTextMessage(from, "You picked an unknown category.");
     }
 }
 

@@ -1,34 +1,25 @@
-// db/firestore.js
 const admin = require('firebase-admin');
 const serviceAccount = require('../firebase-service-account.json');
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-});
+// Prevent multiple initializations
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+}
 
 const db = admin.firestore();
 console.log('Firebase connection established.');
 
-/**
- * Gets or creates a user profile in Firestore.
- * @param {string} wa_id - The user's WhatsApp ID
- * @returns {object} The user's data from Firestore
- */
 async function getOrCreateUser(wa_id) {
     const userRef = db.collection('users').doc(wa_id);
     const doc = await userRef.get();
 
     if (!doc.exists) {
-        console.log(`Creating new user profile for ${wa_id}`);
-        const newUser = {
-            wa_id: wa_id,
-            created_at: new Date(),
-            state: 'default' // Add the initial state
-        };
+        const newUser = { wa_id: wa_id, created_at: new Date(), state: 'default' };
         await userRef.set(newUser);
         return newUser;
     } else {
-        // Ensure existing users have a state
         const userData = doc.data();
         if (!userData.state) {
             await userRef.update({ state: 'default' });
@@ -38,34 +29,16 @@ async function getOrCreateUser(wa_id) {
     }
 }
 
-/**
- * Updates a user's state in Firestore.
- * @param {string} wa_id - The user's WhatsApp ID
- * @param {string} newState - The new state (e.g., 'awaiting_name')
- */
 async function updateUserState(wa_id, newState) {
-    const userRef = db.collection('users').doc(wa_id);
-    await userRef.update({ state: newState });
-    console.log(`Updated state for ${wa_id} to ${newState}`);
+    await db.collection('users').doc(wa_id).update({ state: newState });
 }
 
-/**
- * Updates data on a user's profile.
- * @param {string} wa_id - The user's WhatsApp ID
- * @param {object} data - The data to update (e.g., { name: 'John Doe' })
- */
 async function updateUserData(wa_id, data) {
-    const userRef = db.collection('users').doc(wa_id);
-    await userRef.update(data);
-    console.log(`Updated data for ${wa_id}:`, data);
+    await db.collection('users').doc(wa_id).update(data);
 }
 
-/**
- * Adds an item to a user's cart.
- * (Same as before)
- */
 async function addToCart(wa_id, sku, quantity) {
-    await getOrCreateUser(wa_id); // Ensures user exists
+    await getOrCreateUser(wa_id);
     const cartRef = db.collection('users').doc(wa_id).collection('cart').doc(sku);
     const doc = await cartRef.get();
 
@@ -73,59 +46,76 @@ async function addToCart(wa_id, sku, quantity) {
         const currentQuantity = doc.data().quantity;
         await cartRef.update({ quantity: currentQuantity + quantity });
     } else {
-        await cartRef.set({
-            sku: sku,
-            quantity: quantity,
-            added_at: new Date()
-        });
+        await cartRef.set({ sku: sku, quantity: quantity, added_at: new Date() });
     }
 }
 
-/**
- * Retrieves all items from a user's cart.
- * (Same as before)
- */
 async function getCart(wa_id) {
     const cartRef = db.collection('users').doc(wa_id).collection('cart');
     const snapshot = await cartRef.get();
-
-    if (snapshot.empty) {
-        return [];
-    }
-
+    if (snapshot.empty) return [];
     let cart = [];
-    snapshot.forEach(doc => {
-        cart.push(doc.data());
-    });
+    snapshot.forEach(doc => cart.push(doc.data()));
     return cart;
 }
 
-/**
- * Clears a user's cart (e.g., after checkout).
- * @param {string} wa_id - The user's WhatsApp ID
- */
 async function clearCart(wa_id) {
     const cartRef = db.collection('users').doc(wa_id).collection('cart');
     const snapshot = await cartRef.get();
-
     if (snapshot.empty) return;
-
-    // Delete each document in the cart
     const batch = db.batch();
-    snapshot.docs.forEach(doc => {
-        batch.delete(doc.ref);
-    });
+    snapshot.docs.forEach(doc => batch.delete(doc.ref));
     await batch.commit();
-    console.log(`Cleared cart for ${wa_id}`);
+}
+/**
+ * Creates a new order from the user's cart.
+ * @param {string} wa_id - User's WhatsApp ID
+ * @param {string} name - User's Name
+ * @param {string} address - User's Address
+ * @param {Array} cartItems - Items from the cart
+ * @returns {string} The new Order ID
+ */
+async function createOrder(wa_id, name, address, cartItems) {
+    // Generate a simple Order ID (e.g., ORD-1234)
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const orderId = `ORD-${randomNum}`;
+
+    const orderData = {
+        order_id: orderId,
+        wa_id: wa_id,
+        customer_name: name,
+        shipping_address: address,
+        items: cartItems,
+        status: 'Processing', // Default status
+        created_at: new Date()
+    };
+
+    // Save to a top-level 'orders' collection
+    await db.collection('orders').doc(orderId).set(orderData);
+    console.log(`Order created: ${orderId}`);
+    return orderId;
 }
 
-// Export all our functions
+/**
+ * Retrieves an order by its ID.
+ * @param {string} orderId - The Order ID to look up
+ * @returns {object|null} The order data or null if not found
+ */
+async function getOrder(orderId) {
+    // Handle case sensitivity or extra spaces
+    const cleanId = orderId.trim().toUpperCase();
+    const orderRef = db.collection('orders').doc(cleanId);
+    const doc = await orderRef.get();
+
+    if (doc.exists) {
+        return doc.data();
+    } else {
+        return null;
+    }
+}
+
 module.exports = {
-    db,
-    getOrCreateUser,
-    updateUserState,
-    updateUserData,
-    addToCart,
-    getCart,
-    clearCart
+    db, getOrCreateUser, updateUserState, updateUserData,
+    addToCart, getCart, clearCart,
+    createOrder, getOrder
 };
